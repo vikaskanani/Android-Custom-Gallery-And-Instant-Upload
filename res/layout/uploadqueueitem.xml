@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout android:id="@+id/relativeLayout1"
+	xmlns:android="http://schemas.android.com/apk/res/android"
+	android:layout_width="fill_parent" android:layout_height="fill_parent"
+	android:padding="5dip">
+
+	<ImageView android:id="@+id/QueueItemThumbnail"
+		android:layout_width="70dip" android:layout_height="70dip"
+		android:layout_alignParentLeft="true" android:scaleType="center">
+	</ImageView>
+
+	<EditText android:id="@+id/QueueItemCaption"
+		android:layout_height="wrap_content" android:layout_width="fill_parent"
+		android:layout_toRightOf="@id/QueueItemThumbnail"
+		android:layout_marginLeft="2dip" android:singleLine="true"
+		android:hint="Caption">
+	</EditText>
+
+	<TextView android:id="@+id/uploadStatus" android:layout_width="wrap_content"
+		android:text="Pending" android:layout_height="wrap_content"
+		android:layout_marginLeft="2dip" android:layout_alignParentBottom="true"
+		android:layout_toRightOf="@id/QueueItemThumbnail" android:textStyle="bold"></TextView>
+
+</RelativeLayout>
