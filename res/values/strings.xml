@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="hello">Hello World, AndroidCustomGalleryActivity!</string>
     <string name="app_name">AndroidCustomGallery</string>
+    <string name="WebServiceURL">http://10.0.2.2</string>
+	<string name="exception_message">Server error, try later</string>
+	<string name="internal_exception_message">Internal error occurred</string>
+	<string name="security_exception_message">Security error occurred</string>
+	<string name="CanceledMessage">Canceled</string>
+	<string name="ConnectionTimeOut">5000</string>
+	<string name="SocketTimeout">5000</string>
 </resources>

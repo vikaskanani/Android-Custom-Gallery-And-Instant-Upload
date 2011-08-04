@@ -8,7 +8,6 @@ import java.util.Date;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
-import android.content.res.Configuration;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.media.MediaScannerConnection;
@@ -295,10 +294,5 @@ public class AndroidCustomGalleryActivity extends Activity {
 		boolean selection;
 		int id;
 		Bitmap img;
-	}
-	
-	@Override
-	public void onConfigurationChanged(Configuration newConfig) {
-		super.onConfigurationChanged(newConfig);
 	}
 }

@@ -28,19 +28,19 @@ import android.app.Dialog;
 import android.app.ProgressDialog;
 import android.content.Context;
 import android.content.DialogInterface;
+import android.content.DialogInterface.OnCancelListener;
 import android.content.Intent;
-import android.content.res.Configuration;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.Bitmap.CompressFormat;
 import android.graphics.BitmapFactory;
 import android.media.ExifInterface;
+import android.os.AsyncTask;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
-import android.os.Handler;
-import android.os.Message;
 import android.os.Vibrator;
+import android.os.AsyncTask.Status;
 import android.provider.MediaStore;
 import android.view.KeyEvent;
 import android.view.LayoutInflater;
@@ -55,6 +55,7 @@ import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.ListView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 public class UploadQueue extends Activity {
 	private QueueAdapter queueAdapter;
@@ -66,18 +67,29 @@ public class UploadQueue extends Activity {
 
 	private SSLSocketFactory defaultSSLSocketFactory = null;
 	private HostnameVerifier defaultHostnameVerifier = null;
-
-	static final int PROGRESS_DIALOG = 0;
-	private ProgressDialog progressDialog;
-	ProgressThread progressThread;
 	
+	private ProgressDialog progressDialog;
+	private static final int PROGRESSDIALOG_ID = 0;
+	
+	private static final int CANCELED = -4;
+	private static final int OTHER_INTERNAL_ERROR = -3; //part of internal error
+	private static final int SECURITY_ERROR = -2; //part of internal error
+	private static final int SERVER_STATUS_FAILED = -1; //server side failed
+	private static final int SERVER_STATUS_DEFAULT = 0; //pending
+	private static final int SERVER_STATUS_UPLOADED = 1; //success
+	
+	private UploadTask uploadTask;
+	private int uploadCounter;
 	private boolean uploadFlag;
+	private String PhotoId;
 
 	/** Called when the activity is first created. */
 	@Override
 	public void onCreate(Bundle savedInstanceState) {
 		super.onCreate(savedInstanceState);
 		setContentView(R.layout.uploadqueue);
+		
+		PhotoId = getIntent().getStringExtra("photoId");
 		
 		queueAdapter = new QueueAdapter();
 		String ids = getIntent().getStringExtra("Ids");
@@ -90,7 +102,7 @@ public class UploadQueue extends Activity {
 		startUploadBtn.setOnClickListener(new OnClickListener() {
 
 			public void onClick(View v) {
-				showDialog(PROGRESS_DIALOG);
+				showDialog(PROGRESSDIALOG_ID);
 			}
 		});
 	}
@@ -209,6 +221,7 @@ public class UploadQueue extends Activity {
 			return convertView;
 		}	
 	}
+	
 	public static class ViewHolder {
 		ImageView imageview;
 		EditText caption;
@@ -221,46 +234,445 @@ public class UploadQueue extends Activity {
 		int uploaded;
 	}
 
+	@Override
 	protected Dialog onCreateDialog(int id) {
 		switch (id) {
-		case PROGRESS_DIALOG:
-			removeDialog(PROGRESS_DIALOG);
-			progressDialog = new ProgressDialog(UploadQueue.this);
-			progressDialog.setCancelable(false);
+		case PROGRESSDIALOG_ID:
+			removeDialog(PROGRESSDIALOG_ID);
+			progressDialog = new ProgressDialog(this);
 			progressDialog.setProgressStyle(ProgressDialog.STYLE_HORIZONTAL);
-			progressDialog.setMessage("Uploading...");
-			return progressDialog;
-		default:
-			return null;
-		}
+			progressDialog.setMax(queueAdapter.getUploadCount());
+			progressDialog.setTitle("Uploading");
+			progressDialog.setCancelable(true);
+			progressDialog.setMessage("Please wait...");
+			progressDialog.setOnCancelListener(new OnCancelListener(){
+
+				public void onCancel(DialogInterface dialog) {
+					// TODO Auto-generated method stub
+					if (uploadTask != null && uploadTask.getStatus() != AsyncTask.Status.FINISHED)
+						uploadTask.cancel(true);
+				}
+		
+			});
+	    	break;
+	    default:
+	    	progressDialog = null;
+	    }
+	    return progressDialog;
 	}
 
 	@Override
 	protected void onPrepareDialog(int id, Dialog dialog) {
 		switch (id) {
-		case PROGRESS_DIALOG:
-			progressDialog.setProgress(0);
-			progressThread = new ProgressThread(handler);
-			progressThread.start();
+		case PROGRESSDIALOG_ID:
+			if (uploadTask != null && uploadTask.getStatus() != Status.FINISHED)
+				uploadTask.cancel(true);
+			uploadTask = new UploadTask();
+			uploadTask.execute();
+			break;
 		}
 	}
+	
+	class UploadTask extends AsyncTask<Void, Integer, String> {
+		
+		@Override
+		protected String doInBackground(Void... unused) {
+			uploadCounter = 0;
+			for (QueueItem item:queueAdapter.queueItems){
+				
+				if(isCancelled())
+					return (null);
+				
+				if (item.uploaded != 1){
+					
+					String uploadPath = item.path;
+					
+					BitmapFactory.Options o = new BitmapFactory.Options();
+					o.inJustDecodeBounds = true;
+					BitmapFactory.decodeFile(item.path, o);
+					int owidth = o.outWidth;
+					int oheight = o.outHeight;
+					System.gc();
+					Bitmap bitmap;
+					try {
+						bitmap = decodeFile(item.path);
+						if (bitmap == null)
+							throw new Exception();
+					} catch (Exception e) {
+						e.printStackTrace();
+						//stop the work as there is no more memory available
+						return (null);
+					}
+					
+					if(isCancelled())
+						return (null);
+					
+					int height = bitmap.getHeight();
+					int width = bitmap.getWidth();
+					
+					if (owidth > width || oheight > height) {
+						try{
+							String oName = item.path.substring(item.path
+									.lastIndexOf("/") + 1);
+							File myDirectory = new File(
+									Environment.getExternalStorageDirectory()
+											+ "/REOAllegiance/temp/");
+							if (myDirectory.isDirectory()) {
+								String[] children = myDirectory.list();
+								for (int j = 0; j < children.length; j++) {
+									new File(myDirectory, children[j]).delete();
+								}
+							}
+							myDirectory.mkdirs();
+							File file = new File(myDirectory, "tmp_" + oName);
+							uploadPath = myDirectory + "/tmp_" + oName;
+							FileOutputStream fos = new FileOutputStream(file);
+							bitmap.compress(CompressFormat.JPEG, 100, fos);
+							bitmap.recycle();
+							fos.flush();
+							fos.close();
+						} catch (SecurityException e) {
+							e.printStackTrace();
+							//STOP the work as there is some security issue that does not allow file operation
+							publishProgress(SECURITY_ERROR);
+							return (null);
+						} catch (Exception e) {
+							e.printStackTrace();
+							//STOP the work as there is an IOException that does not allow file operation
+							publishProgress(OTHER_INTERNAL_ERROR);
+							return (null);
+						}
+						
+						if(isCancelled())
+							return (null);
+						
+						try{
+							// copy paste exif information from original file to new
+							// file
+							ExifInterface oldexif = new ExifInterface(
+									item.path);
+							ExifInterface newexif = new ExifInterface(uploadPath);
 
-	final Handler handler = new Handler() {
-		public void handleMessage(Message msg) {
-			int total = msg.arg1;
-			int percent = total * 100 / queueAdapter.queueItems.size();
-			progressDialog.setProgress(percent);
-			if (total >= msg.arg2) {
-				// dismissDialog(PROGRESS_DIALOG);
-				removeDialog(PROGRESS_DIALOG);
+							int build = Build.VERSION.SDK_INT;
 
+							// From API 11
+							if (build >= 11) {
+								if (oldexif.getAttribute("FNumber") != null) {
+									newexif.setAttribute("FNumber",
+											oldexif.getAttribute("FNumber"));
+								}
+								if (oldexif.getAttribute("ExposureTime") != null) {
+									newexif.setAttribute("ExposureTime",
+											oldexif.getAttribute("ExposureTime"));
+								}
+								if (oldexif.getAttribute("ISOSpeedRatings") != null) {
+									newexif.setAttribute("ISOSpeedRatings",
+											oldexif.getAttribute("ISOSpeedRatings"));
+								}
+							}
+							// From API 9
+							if (build >= 9) {
+								if (oldexif.getAttribute("GPSAltitude") != null) {
+									newexif.setAttribute("GPSAltitude",
+											oldexif.getAttribute("GPSAltitude"));
+								}
+								if (oldexif.getAttribute("GPSAltitudeRef") != null) {
+									newexif.setAttribute("GPSAltitudeRef",
+											oldexif.getAttribute("GPSAltitudeRef"));
+								}
+							}
+							// From API 8
+							if (build >= 8) {
+								if (oldexif.getAttribute("FocalLength") != null) {
+									newexif.setAttribute("FocalLength",
+											oldexif.getAttribute("FocalLength"));
+								}
+								if (oldexif.getAttribute("GPSDateStamp") != null) {
+									newexif.setAttribute("GPSDateStamp",
+											oldexif.getAttribute("GPSDateStamp"));
+								}
+								if (oldexif.getAttribute("GPSProcessingMethod") != null) {
+									newexif.setAttribute(
+											"GPSProcessingMethod",
+											oldexif.getAttribute("GPSProcessingMethod"));
+								}
+								if (oldexif.getAttribute("GPSTimeStamp") != null) {
+									newexif.setAttribute("GPSTimeStamp", ""
+											+ oldexif.getAttribute("GPSTimeStamp"));
+								}
+							}
+							if (oldexif.getAttribute("DateTime") != null) {
+								newexif.setAttribute("DateTime",
+										oldexif.getAttribute("DateTime"));
+							}
+							if (oldexif.getAttribute("Flash") != null) {
+								newexif.setAttribute("Flash",
+										oldexif.getAttribute("Flash"));
+							}
+							if (oldexif.getAttribute("GPSLatitude") != null) {
+								newexif.setAttribute("GPSLatitude",
+										oldexif.getAttribute("GPSLatitude"));
+							}
+							if (oldexif.getAttribute("GPSLatitudeRef") != null) {
+								newexif.setAttribute("GPSLatitudeRef",
+										oldexif.getAttribute("GPSLatitudeRef"));
+							}
+							if (oldexif.getAttribute("GPSLongitude") != null) {
+								newexif.setAttribute("GPSLongitude",
+										oldexif.getAttribute("GPSLongitude"));
+							}
+							if (oldexif.getAttribute("GPSLatitudeRef") != null) {
+								newexif.setAttribute("GPSLongitudeRef",
+										oldexif.getAttribute("GPSLongitudeRef"));
+							}
+							newexif.setAttribute("ImageLength",
+									"" + height);
+							newexif.setAttribute("ImageWidth",
+									"" + width);
+
+							if (oldexif.getAttribute("Make") != null) {
+								newexif.setAttribute("Make",
+										oldexif.getAttribute("Make"));
+							}
+							if (oldexif.getAttribute("Model") != null) {
+								newexif.setAttribute("Model",
+										oldexif.getAttribute("Model"));
+							}
+							if (oldexif.getAttribute("Orientation") != null) {
+								newexif.setAttribute("Orientation",
+										oldexif.getAttribute("Orientation"));
+							}
+							if (oldexif.getAttribute("WhiteBalance") != null) {
+								newexif.setAttribute("WhiteBalance",
+										oldexif.getAttribute("WhiteBalance"));
+							}
+
+							newexif.saveAttributes();
+							
+						} catch (Exception e) {
+							e.printStackTrace();
+							//It's okay, if we can't manage to copy exif information
+						}
+					}
+					
+					if(isCancelled())
+						return (null);
+					
+					HttpURLConnection conn = null;
+					DataOutputStream dos = null;
+					boolean trustEveryone = true;
+					URL url;
+					
+					try {
+						url = new URL(
+								  getString(R.string.WebServiceURL) + "/cfc/iphonewebservice.cfc?method=uploadPhoto&returnformat=json");
+						
+						File file = new File(uploadPath);
+						InputStream fileInputStream = new FileInputStream(file);
+	
+						int bytesRead, bytesAvailable, bufferSize;
+						long totalBytes;
+						byte[] buffer;
+						final int maxBufferSize = 8096;
+						
+						// Open a HTTP connection to the URL based on protocol
+						if (url.getProtocol().toLowerCase().equals("https")) {
+							if (!trustEveryone) {
+								conn = (HttpsURLConnection) url.openConnection();
+							}
+							// Use our HTTPS connection that blindly trusts
+							// everyone.
+							// This should only be used in debug environments
+							else {
+								// Setup the HTTPS connection class to trust
+								// everyone
+								trustAllHosts();
+								HttpsURLConnection https = (HttpsURLConnection) url
+										.openConnection();
+								// Save the current hostnameVerifier
+								defaultHostnameVerifier = https
+										.getHostnameVerifier();
+								// Setup the connection not to verify hostnames
+								https.setHostnameVerifier(DO_NOT_VERIFY);
+								conn = https;
+							}
+						} else {
+							conn = (HttpURLConnection) url.openConnection();
+						}
+						conn.setDoInput(true);
+						conn.setDoOutput(true);
+						conn.setUseCaches(false);
+						conn.setRequestMethod("POST");
+						conn.setRequestProperty("Connection", "Keep-Alive");
+						conn.setRequestProperty("Content-Type",
+								"multipart/form-data;boundary=" + BOUNDRY);
+	
+						dos = new DataOutputStream(conn.getOutputStream());
+	
+						// Add photo id
+						dos.writeBytes(LINE_START + BOUNDRY + LINE_END);
+						dos.writeBytes("Content-Disposition: form-data; name=\"photoId\";");
+						dos.writeBytes(LINE_END + LINE_END);
+						dos.writeBytes(PhotoId);
+						dos.writeBytes(LINE_END);
+	
+						// Add caption. Passed only if it is not null
+						if (item.caption != null){
+							dos.writeBytes(LINE_START + BOUNDRY + LINE_END);
+							dos.writeBytes("Content-Disposition: form-data; name=\"photoCaption\";");
+							dos.writeBytes(LINE_END + LINE_END);
+							dos.writeBytes(item.caption);
+							dos.writeBytes(LINE_END);
+						}
+	
+						String fName = uploadPath.substring(uploadPath
+								.lastIndexOf("/") + 1);
+	
+						dos.writeBytes(LINE_START + BOUNDRY + LINE_END);
+						dos.writeBytes("Content-Disposition: form-data; name=\"uploaded\";"
+								+ " filename=\"" + fName + "\"" + LINE_END);
+						dos.writeBytes("Content-Type: image/JPEG" + LINE_END);
+						dos.writeBytes(LINE_END);
+	
+						// create a buffer of maximum size
+						bytesAvailable = fileInputStream.available();
+						bufferSize = Math.min(bytesAvailable, maxBufferSize);
+						buffer = new byte[bufferSize];
+	
+						// read file and write it into form...
+						bytesRead = fileInputStream.read(buffer, 0, bufferSize);
+						totalBytes = 0;
+	
+						while (bytesRead > 0) {
+							totalBytes += bytesRead;
+							dos.write(buffer, 0, bufferSize);
+							bytesAvailable = fileInputStream.available();
+							bufferSize = Math.min(bytesAvailable, maxBufferSize);
+							bytesRead = fileInputStream.read(buffer, 0, bufferSize);
+						}
+	
+						// send multipart form data necesssary after file data...
+						dos.writeBytes(LINE_END);
+						dos.writeBytes(LINE_START + BOUNDRY + LINE_START + LINE_END);
+	
+						// close streams
+						fileInputStream.close();
+						dos.flush();
+						dos.close();
+						if (uploadPath != item.path)
+							file.delete();
+					} catch(Exception e){
+						e.printStackTrace();
+						//STOP the work as there is a connection issue, we assume that file isn't uploaded yet as we only dealing with URLConnection
+						publishProgress(SERVER_STATUS_DEFAULT);
+						return (null);
+					}
+					
+					//processing response
+					try{
+						switch (conn.getResponseCode()) {
+						case 200:
+							DataInputStream inStream;
+							try {
+								inStream = new DataInputStream(
+										conn.getInputStream());
+								StringBuffer responseString = new StringBuffer("");
+								String line;
+								while ((line = inStream.readLine()) != null) {
+									responseString.append(line);
+								}
+								JSONObject JResponse = new JSONObject(
+										responseString.toString());
+								int success = JResponse.getInt("SUCCESS");
+								// String message = JResponse.getString("MESSAGE");
+								if (success == 1) {
+									item.uploaded = 1;
+									publishProgress(SERVER_STATUS_UPLOADED);
+								} else {
+									item.uploaded = -1;
+								}
+								inStream.close();
+							} catch (Exception e) {
+								e.printStackTrace();
+								item.uploaded = -1;
+							}
+							break;
+						case 500:
+						default:
+							item.uploaded = -1;
+						}
+						// Revert back to the proper verifier and socket factories
+						if (trustEveryone
+								&& url!= null && url.getProtocol().toLowerCase().equals("https")) {
+							((HttpsURLConnection) conn)
+									.setHostnameVerifier(defaultHostnameVerifier);
+							HttpsURLConnection
+									.setDefaultSSLSocketFactory(defaultSSLSocketFactory);
+						}
+					} catch (Exception e) {
+						e.printStackTrace();
+						//failed on server side, continue with rest of the items
+						publishProgress(SERVER_STATUS_FAILED);
+					}
+					uploadCounter++;
+					publishProgress(SERVER_STATUS_UPLOADED);
+				}
+			}
+			return (null);
+		}
+		
+		@Override 
+		protected void onCancelled() {
+			publishProgress(CANCELED);
+		}
+		
+		@Override
+		protected void onProgressUpdate(Integer... statusCode) {
+			switch (statusCode[0]) {
+			case CANCELED:
+				removeDialog(PROGRESSDIALOG_ID);
+				Toast.makeText(getApplicationContext(),
+						getString(R.string.CanceledMessage),
+						Toast.LENGTH_SHORT).show();
+				queueAdapter.notifyDataSetChanged();
+				break;
+			case OTHER_INTERNAL_ERROR:
+				removeDialog(PROGRESSDIALOG_ID);
+				Toast.makeText(getApplicationContext(),
+						getString(R.string.internal_exception_message),
+						Toast.LENGTH_LONG).show();
+				break;
+			case SECURITY_ERROR:
+				removeDialog(PROGRESSDIALOG_ID);
+				Toast.makeText(getApplicationContext(),
+						getString(R.string.security_exception_message),
+						Toast.LENGTH_LONG).show();
+				break;
+			case SERVER_STATUS_UPLOADED:
+				if(!uploadFlag)
+					uploadFlag = true;
+			default:
+				progressDialog.setProgress(uploadCounter);
+				queueAdapter.notifyDataSetChanged();
+			}
+		}
+
+		@Override
+		protected void onPostExecute(String sResponse) {
+			try {
+				removeDialog(PROGRESSDIALOG_ID);
+				
 				AlertDialog.Builder builder = new AlertDialog.Builder(
 						UploadQueue.this);
 
 				if (queueAdapter.getUploadCount() == 0) {
-
-					builder.setMessage("Files uploaded successfully.")
-							.setCancelable(false)
+					String message = "";
+					if (uploadCounter > 1)
+						message = message + uploadCounter + " photos uploaded.";
+					else if(uploadCounter == 1)
+						message = message + uploadCounter + " photo uploaded.";
+					
+					builder.setMessage(message).setCancelable(false)
 							.setPositiveButton("Ok",
 									new DialogInterface.OnClickListener() {
 										public void onClick(
@@ -288,7 +700,7 @@ public class UploadQueue extends Activity {
 
 				} else {
 					builder.setMessage(
-							"Some files are not uploaded, pressing upload button will again try to upload files which are not uploaded.")
+							"Some photos are not uploaded, Please try again.")
 							.setCancelable(false)
 							.setPositiveButton("Ok",
 									new DialogInterface.OnClickListener() {
@@ -310,342 +722,11 @@ public class UploadQueue extends Activity {
 					//Extra vibrate notification
 					((Vibrator) getSystemService(Context.VIBRATOR_SERVICE)).vibrate(1000);
 				}
-				queueAdapter.notifyDataSetChanged();
-			}
-		}
-	};
-
-	/** Nested class that performs progress calculations (counting) */
-	private class ProgressThread extends Thread {
-		Handler mHandler;
-		int total;
-
-		ProgressThread(Handler h) {
-			mHandler = h;
-			total = 1;
-		}
-
-		public void run() {
-			final int len = queueAdapter.getCount();
-			final int uploadcount = queueAdapter.getUploadCount();
-			String finalUploadPath;
-			for (int i = 0; i < len; i++) {
-				QueueItem queueItem = new QueueItem();
-				queueItem = queueAdapter.getItem(i);
-				if (queueItem.uploaded == 1) {
-					// Update progress bar
-					Message msg = mHandler.obtainMessage();
-					msg.arg1 = total;
-					msg.arg2 = uploadcount;
-					mHandler.sendMessage(msg);
-					total++;
-					continue; // only process rest of the status
-				}
-
-				finalUploadPath = queueItem.path;
-
-				BitmapFactory.Options o = new BitmapFactory.Options();
-				o.inJustDecodeBounds = true;
-				BitmapFactory.decodeFile(queueItem.path, o);
-				int owidth = o.outWidth;
-				int oheight = o.outHeight;
-				System.gc();
-				Bitmap bitmap = decodeFile(queueItem.path);
-				int height = bitmap.getHeight();
-				int width = bitmap.getWidth();
-
-				// Here we are trying to resize the image before we upload it,
-				// because slow internet connection can take too much time, as
-				// eventually we also resize image on server side, so why
-				// shouldn't be done here?
-				boolean isResized = false;
-				try {
-					if (owidth > width || oheight > height) {
-						isResized = true;
-						String oName = queueItem.path.substring(queueItem.path
-								.lastIndexOf("/") + 1);
-						File myDirectory = new File(
-								Environment.getExternalStorageDirectory()
-										+ "/REOAllegiance/temp/");
-						if (myDirectory.isDirectory()) {
-							String[] children = myDirectory.list();
-							for (int j = 0; j < children.length; j++) {
-								new File(myDirectory, children[j]).delete();
-							}
-						}
-						myDirectory.mkdirs();
-						File file = new File(myDirectory, "tmp_" + oName);
-						String newPath = myDirectory + "/tmp_" + oName;
-						FileOutputStream fos = new FileOutputStream(file);
-						bitmap.compress(CompressFormat.JPEG, 100, fos);
-						bitmap.recycle();
-						fos.flush();
-						fos.close();
-
-						// copy paste exif information from original file to new
-						// file
-						ExifInterface oldexif = new ExifInterface(
-								queueItem.path);
-						ExifInterface newexif = new ExifInterface(newPath);
-
-						int build = Build.VERSION.SDK_INT;
-
-						// From API 11
-						if (build >= 11) {
-							if (oldexif.getAttribute("FNumber") != null) {
-								newexif.setAttribute("FNumber",
-										oldexif.getAttribute("FNumber"));
-							}
-							if (oldexif.getAttribute("ExposureTime") != null) {
-								newexif.setAttribute("ExposureTime",
-										oldexif.getAttribute("ExposureTime"));
-							}
-							if (oldexif.getAttribute("ISOSpeedRatings") != null) {
-								newexif.setAttribute("ISOSpeedRatings",
-										oldexif.getAttribute("ISOSpeedRatings"));
-							}
-						}
-						// From API 9
-						if (build >= 9) {
-							if (oldexif.getAttribute("GPSAltitude") != null) {
-								newexif.setAttribute("GPSAltitude",
-										oldexif.getAttribute("GPSAltitude"));
-							}
-							if (oldexif.getAttribute("GPSAltitudeRef") != null) {
-								newexif.setAttribute("GPSAltitudeRef",
-										oldexif.getAttribute("GPSAltitudeRef"));
-							}
-						}
-						// From API 8
-						if (build >= 8) {
-							if (oldexif.getAttribute("FocalLength") != null) {
-								newexif.setAttribute("FocalLength",
-										oldexif.getAttribute("FocalLength"));
-							}
-							if (oldexif.getAttribute("GPSDateStamp") != null) {
-								newexif.setAttribute("GPSDateStamp",
-										oldexif.getAttribute("GPSDateStamp"));
-							}
-							if (oldexif.getAttribute("GPSProcessingMethod") != null) {
-								newexif.setAttribute(
-										"GPSProcessingMethod",
-										oldexif.getAttribute("GPSProcessingMethod"));
-							}
-							if (oldexif.getAttribute("GPSTimeStamp") != null) {
-								newexif.setAttribute("GPSTimeStamp", ""
-										+ oldexif.getAttribute("GPSTimeStamp"));
-							}
-						}
-						if (oldexif.getAttribute("DateTime") != null) {
-							newexif.setAttribute("DateTime",
-									oldexif.getAttribute("DateTime"));
-						}
-						if (oldexif.getAttribute("Flash") != null) {
-							newexif.setAttribute("Flash",
-									oldexif.getAttribute("Flash"));
-						}
-						if (oldexif.getAttribute("GPSLatitude") != null) {
-							newexif.setAttribute("GPSLatitude",
-									oldexif.getAttribute("GPSLatitude"));
-						}
-						if (oldexif.getAttribute("GPSLatitudeRef") != null) {
-							newexif.setAttribute("GPSLatitudeRef",
-									oldexif.getAttribute("GPSLatitudeRef"));
-						}
-						if (oldexif.getAttribute("GPSLongitude") != null) {
-							newexif.setAttribute("GPSLongitude",
-									oldexif.getAttribute("GPSLongitude"));
-						}
-						if (oldexif.getAttribute("GPSLatitudeRef") != null) {
-							newexif.setAttribute("GPSLongitudeRef",
-									oldexif.getAttribute("GPSLongitudeRef"));
-						}
-						newexif.setAttribute("ImageLength",
-								"" + height);
-						newexif.setAttribute("ImageWidth",
-								"" + width);
-
-						if (oldexif.getAttribute("Make") != null) {
-							newexif.setAttribute("Make",
-									oldexif.getAttribute("Make"));
-						}
-						if (oldexif.getAttribute("Model") != null) {
-							newexif.setAttribute("Model",
-									oldexif.getAttribute("Model"));
-						}
-						if (oldexif.getAttribute("Orientation") != null) {
-							newexif.setAttribute("Orientation",
-									oldexif.getAttribute("Orientation"));
-						}
-						if (oldexif.getAttribute("WhiteBalance") != null) {
-							newexif.setAttribute("WhiteBalance",
-									oldexif.getAttribute("WhiteBalance"));
-						}
-
-						newexif.saveAttributes();
-
-						finalUploadPath = newPath;
-					}
-
-					File file = new File(finalUploadPath);
-					InputStream fileInputStream = new FileInputStream(file);
-
-					HttpURLConnection conn = null;
-					DataOutputStream dos = null;
-					boolean trustEveryone = true;
-
-					int bytesRead, bytesAvailable, bufferSize;
-					long totalBytes;
-					byte[] buffer;
-					int maxBufferSize = 8096;
-					// open a URL connection to the server
-					URL url = new URL("http://10.0.2.2/cfc/iphonewebservice.cfc?method=uploadPhoto&returnformat=json");
-
-					// Open a HTTP connection to the URL based on protocol
-					if (url.getProtocol().toLowerCase().equals("https")) {
-						// Using standard HTTPS connection. Will not allow self
-						// signed
-						// certificate
-						if (!trustEveryone) {
-							conn = (HttpsURLConnection) url.openConnection();
-						}
-						// Use our HTTPS connection that blindly trusts
-						// everyone.
-						// This should only be used in debug environments
-						else {
-							// Setup the HTTPS connection class to trust
-							// everyone
-							trustAllHosts();
-							HttpsURLConnection https = (HttpsURLConnection) url
-									.openConnection();
-							// Save the current hostnameVerifier
-							defaultHostnameVerifier = https
-									.getHostnameVerifier();
-							// Setup the connection not to verify hostnames
-							https.setHostnameVerifier(DO_NOT_VERIFY);
-							conn = https;
-						}
-					} else {
-						conn = (HttpURLConnection) url.openConnection();
-					}
-					conn.setDoInput(true);
-					conn.setDoOutput(true);
-					conn.setUseCaches(false);
-					conn.setRequestMethod("POST");
-					conn.setRequestProperty("Connection", "Keep-Alive");
-					conn.setRequestProperty("Content-Type",
-							"multipart/form-data;boundary=" + BOUNDRY);
-
-					dos = new DataOutputStream(conn.getOutputStream());
-
-					// Add photo id
-					dos.writeBytes(LINE_START + BOUNDRY + LINE_END);
-					dos.writeBytes("Content-Disposition: form-data; name=\"photoId\";");
-					dos.writeBytes(LINE_END + LINE_END);
-					dos.writeBytes(getIntent().getStringExtra("photoId"));
-					dos.writeBytes(LINE_END);
-
-					// Add caption. Passed only if it is not null
-					if (queueItem.caption != null){
-						dos.writeBytes(LINE_START + BOUNDRY + LINE_END);
-						dos.writeBytes("Content-Disposition: form-data; name=\"photoCaption\";");
-						dos.writeBytes(LINE_END + LINE_END);
-						dos.writeBytes(queueItem.caption);
-						dos.writeBytes(LINE_END);
-					}
-
-					String fName = finalUploadPath.substring(finalUploadPath
-							.lastIndexOf("/") + 1);
-
-					dos.writeBytes(LINE_START + BOUNDRY + LINE_END);
-					dos.writeBytes("Content-Disposition: form-data; name=\"uploaded\";"
-							+ " filename=\"" + fName + "\"" + LINE_END);
-					dos.writeBytes("Content-Type: image/JPEG" + LINE_END);
-					dos.writeBytes(LINE_END);
-
-					// create a buffer of maximum size
-					bytesAvailable = fileInputStream.available();
-					bufferSize = Math.min(bytesAvailable, maxBufferSize);
-					buffer = new byte[bufferSize];
-
-					// read file and write it into form...
-					bytesRead = fileInputStream.read(buffer, 0, bufferSize);
-					totalBytes = 0;
-
-					while (bytesRead > 0) {
-						totalBytes += bytesRead;
-						dos.write(buffer, 0, bufferSize);
-						bytesAvailable = fileInputStream.available();
-						bufferSize = Math.min(bytesAvailable, maxBufferSize);
-						bytesRead = fileInputStream.read(buffer, 0, bufferSize);
-					}
-
-					// send multipart form data necesssary after file data...
-					dos.writeBytes(LINE_END);
-					dos.writeBytes(LINE_START + BOUNDRY + LINE_START + LINE_END);
-
-					// close streams
-					fileInputStream.close();
-					dos.flush();
-					dos.close();
-
-					// ------------------ read the SERVER RESPONSE
-					switch (conn.getResponseCode()) {
-					case 200:
-						DataInputStream inStream;
-						try {
-							inStream = new DataInputStream(
-									conn.getInputStream());
-							StringBuffer responseString = new StringBuffer("");
-							String line;
-							while ((line = inStream.readLine()) != null) {
-								responseString.append(line);
-							}
-							JSONObject JResponse = new JSONObject(
-									responseString.toString());
-							int success = JResponse.getInt("SUCCESS");
-							// String message = JResponse.getString("MESSAGE");
-							if (success == 1) {
-								queueAdapter.queueItems.get(i).uploaded = 1;
-								uploadFlag = true;
-							} else {
-								queueAdapter.queueItems.get(i).uploaded = -1;
-							}
-							inStream.close();
-						} catch (Exception e) {
-							e.printStackTrace();
-							queueAdapter.queueItems.get(i).uploaded = -1;
-						}
-						break;
-					case 500:
-					default:
-						queueAdapter.queueItems.get(i).uploaded = -1;
-					}
-					// Revert back to the proper verifier and socket factories
-					if (trustEveryone
-							&& url.getProtocol().toLowerCase().equals("https")) {
-						((HttpsURLConnection) conn)
-								.setHostnameVerifier(defaultHostnameVerifier);
-						HttpsURLConnection
-								.setDefaultSSLSocketFactory(defaultSSLSocketFactory);
-					}
-
-					// Clean up directory if image resized
-					if (isResized) {
-						File tempFile = new File(finalUploadPath);
-						tempFile.delete();
-					}
-				} catch (Exception e) {
-					e.printStackTrace();
-					queueAdapter.queueItems.get(i).uploaded = -1;
-				} finally {
-					// Update progress bar
-					Message msg = mHandler.obtainMessage();
-					msg.arg1 = total;
-					msg.arg2 = uploadcount;
-					mHandler.sendMessage(msg);
-					total++;
-				}
+				
+			} catch (Exception e) {
+				Toast.makeText(getApplicationContext(), getString(R.string.exception_message),
+						Toast.LENGTH_LONG).show();
+				e.printStackTrace();
 			}
 		}
 	}
@@ -676,15 +757,6 @@ public class UploadQueue extends Activity {
 		return BitmapFactory.decodeFile(path, o2);
 	}
 
-	/**
-	 * This function will install a trust manager that will blindly trust all
-	 * SSL certificates. The reason this code is being added is to enable
-	 * developers to do development using self signed SSL certificates on their
-	 * web server.
-	 * 
-	 * The standard HttpsURLConnection class will throw an exception on self
-	 * signed certificates if this code is not run.
-	 */
 	private void trustAllHosts() {
 		// Create a trust manager that does not validate certificate chains
 		TrustManager[] trustAllCerts = new TrustManager[] { new X509TrustManager() {
@@ -722,21 +794,23 @@ public class UploadQueue extends Activity {
 			return true;
 		}
 	};
-
-	@Override
-	public void onConfigurationChanged(Configuration newConfig) {
-		super.onConfigurationChanged(newConfig);
-	}
 	
+	@Override
+	protected void onDestroy (){
+		removeDialog(PROGRESSDIALOG_ID);
+		if (uploadTask != null && uploadTask.getStatus() != Status.FINISHED)
+			uploadTask.cancel(true);
+		super.onDestroy();
+	}
+
 	@Override
 	public boolean onKeyDown(int keyCode, KeyEvent event) {
 		if ((keyCode == KeyEvent.KEYCODE_BACK)) {
-			Intent intent = new Intent();
 			if (uploadFlag)
-				setResult(RESULT_OK, intent);
+				setResult(RESULT_OK, getIntent());
 			else
-				setResult(RESULT_CANCELED, intent);
-			finish();
+				setResult(RESULT_CANCELED, getIntent());
+			UploadQueue.this.finish();
 			return true;
 		}
 		return super.onKeyDown(keyCode, event);
